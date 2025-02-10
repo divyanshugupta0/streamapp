@@ -574,6 +574,10 @@
 
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('Your browser does not support audio streaming');
+            }
+
             if (isMobile) {
                 stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
@@ -584,12 +588,15 @@
                     video: false
                 });
             } else {
+                if (!navigator.mediaDevices.getDisplayMedia) {
+                    throw new Error('System audio capture is not supported in your browser');
+                }
+                
                 stream = await navigator.mediaDevices.getDisplayMedia({
                     audio: {
                         echoCancellation: false,
                         noiseSuppression: false,
-                        autoGainControl: false,
-                        deviceId: 'default'
+                        autoGainControl: false
                     },
                     video: false
                 });
