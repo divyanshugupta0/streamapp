@@ -240,6 +240,57 @@
             }
         }
 
+        .volume-control {
+            display: none;
+            align-items: center;
+            gap: 1rem;
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--background);
+            border-radius: 0.875rem;
+            border: 1px solid var(--border);
+        }
+
+        .volume-slider {
+            flex: 1;
+            height: 4px;
+            -webkit-appearance: none;
+            background: var(--border);
+            border-radius: 2px;
+        }
+
+        .volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: var(--accent);
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .listener-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: rgba(5, 150, 105, 0.08);
+            border-radius: 0.5rem;
+            color: var(--success);
+            font-weight: 500;
+        }
+
+        .reconnect-btn {
+            display: none;
+            margin-top: 1rem;
+            padding: 0.75rem 1.5rem;
+            background: var(--danger);
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
         @media (max-width: 768px) {
             .container { padding: 1.5rem; }
             .header { padding: 2.5rem 1.5rem; }
@@ -283,6 +334,15 @@
             </button>
         </div>
 
+        <div class="volume-control" id="volumeControl">
+            <span>Volume</span>
+            <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.1" value="1">
+        </div>
+        <div class="listener-status" id="listenerStatus" style="display: none">
+            <span>●</span> Listening
+        </div>
+        <button class="reconnect-btn" id="reconnectBtn">Reconnect to Host</button>
+
         <div class="connected-users">
             <h2>Connected Users</h2>
             <ul class="user-list" id="userList"></ul>
@@ -297,6 +357,10 @@
     let connections = new Set();
     let isStreaming = false;
     let audioElement = null;
+    let audioContext;
+    let gainNode;
+    let isListener = false;
+    let lastHostId = null;
     
     // DOM Elements
     const startStreamBtn = document.getElementById('startStream');
@@ -373,13 +437,28 @@
         showNotification('User disconnected');
     }
 
+    function initAudioProcessing(stream) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioContext.createMediaStreamSource(stream);
+        gainNode = audioContext.createGain();
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        if (!isListener) {
+            document.getElementById('volumeControl').style.display = 'flex';
+            document.getElementById('volumeSlider').addEventListener('input', (e) => {
+                gainNode.gain.value = e.target.value;
+            });
+        }
+    }
+
     // Core Functionality
     function initPeer() {
         peer = new Peer({
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
+                    { urls: 'stun:stun1.google.com:19302' }
                 ]
             },
             debug: 2
@@ -441,16 +520,25 @@
         audioElement.srcObject = remoteStream;
 
         listenerControls.style.display = 'block';
+        const listenerStatus = document.getElementById('listenerStatus');
+        
         startListeningBtn.onclick = () => {
             audioElement.play()
                 .then(() => {
                     showNotification('Playback started');
                     listenerControls.style.display = 'none';
+                    listenerStatus.style.display = 'inline-flex';
+                    initAudioProcessing(remoteStream);
                 })
                 .catch(err => {
                     console.error('Playback error:', err);
                     showNotification('Failed to start playback. Please try again.');
                 });
+        };
+
+        audioElement.onended = () => {
+            listenerStatus.style.display = 'none';
+            document.getElementById('reconnectBtn').style.display = 'block';
         };
     }
 
@@ -527,17 +615,26 @@
     }
 
     function connectToHost(hostId) {
+        isListener = true;
+        lastHostId = hostId;
         const conn = peer.connect(hostId);
+        
         conn.on('open', () => {
             startStreamBtn.style.display = 'none';
             shareLinkBtn.style.display = 'none';
             statusContainer.style.display = 'none';
             showNotification('Connected to host');
+            document.getElementById('reconnectBtn').style.display = 'none';
         });
-    
-        conn.on('error', (err) => {
-            console.error('Host connection error:', err);
+
+        conn.on('error', () => {
             showNotification('Failed to connect to host');
+            document.getElementById('reconnectBtn').style.display = 'block';
+        });
+
+        conn.on('close', () => {
+            document.getElementById('reconnectBtn').style.display = 'block';
+            document.getElementById('listenerStatus').style.display = 'none';
         });
     }
 
@@ -553,6 +650,12 @@
             showNotification('Failed to copy link');
         });
     });
+
+    document.getElementById('reconnectBtn').addEventListener('click', () => {
+        if (lastHostId) {
+            connectToHost(lastHostId);
+        }
+    });
     
     // Initialize on page load
     window.addEventListener('load', () => {
@@ -562,4 +665,3 @@
 </script>
 </body>
 </html>
-
