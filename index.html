@@ -301,6 +301,7 @@
     let sessionId = null;
     let backupSessionId = null; // Store backup peer ID
     let gainNode = null; // For volume control
+    let activeConnection = null; // Track active connection
     
     // DOM Elements
     const startStreamBtn = document.getElementById('startStream');
@@ -334,8 +335,8 @@
         gainNode = ctx.createGain(); // Create gain node for volume control
         const destination = ctx.createMediaStreamDestination();
         
-        // Add buffer for smoother streaming
-        const buffer = ctx.createScriptProcessor(4096, 1, 1);
+        // Increase buffer size for smoother streaming
+        const buffer = ctx.createScriptProcessor(8192, 1, 1);
         
         compressor.threshold.value = -50;
         compressor.knee.value = 40;
@@ -367,12 +368,12 @@
         statusContainer.classList.toggle('streaming', isStreaming);
         statusText.textContent = isStreaming ? 'Streaming' : 'Not Streaming';
 
-        // Add volume control when streaming
+        // Add volume control only for streamer
         if (isStreaming) {
             const volumeControl = document.createElement('div');
             volumeControl.innerHTML = `
                 <div style="margin-top: 1rem;">
-                    <label for="volume">Volume: </label>
+                    <label for="volume">Stream Volume: </label>
                     <input type="range" id="volume" min="0" max="2" step="0.1" value="1" style="width: 200px;">
                 </div>
             `;
@@ -381,9 +382,6 @@
             document.getElementById('volume').addEventListener('input', (e) => {
                 if (gainNode) {
                     gainNode.gain.value = e.target.value;
-                }
-                if (audioElement) {
-                    audioElement.volume = e.target.value;
                 }
             });
         } else {
@@ -406,8 +404,8 @@
     function handleCallError(err) {
         console.error('Call error:', err);
         showNotification('Call failed: ' + err.message);
-        // Try backup peer if main fails
-        if (backupPeer) {
+        // Switch to backup peer if main fails
+        if (backupPeer && activeConnection === 'main') {
             useBackupPeer();
         }
     }
@@ -461,7 +459,8 @@
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
+                    { urls: 'stun:stun1.l.google.com:19302' },
+                    { urls: 'turn:numb.viagenie.ca', username: 'webrtc@live.com', credential: 'muazkh' }
                 ]
             },
             debug: 2
@@ -476,6 +475,7 @@
                 sessionId = id;
                 setSessionCookie(id);
                 peer = newPeer;
+                activeConnection = 'main';
                 
                 const urlParams = new URLSearchParams(window.location.search);
                 const hostId = urlParams.get('host');
@@ -513,14 +513,12 @@
         
         if (stream) {
             const compressedStream = compressAudio(stream);
-            const call = peer.call(conn.peer, compressedStream);
-            call.on('error', handleCallError);
+            // Send stream through both peers for redundancy
+            const mainCall = peer.call(conn.peer, compressedStream);
+            mainCall.on('error', handleCallError);
             
-            // Also stream through backup peer
-            if (backupPeer) {
-                const backupCall = backupPeer.call(conn.peer, compressedStream);
-                backupCall.on('error', handleCallError);
-            }
+            const backupCall = backupPeer.call(conn.peer, compressedStream);
+            backupCall.on('error', handleCallError);
         }
         
         conn.on('close', () => {
@@ -545,32 +543,20 @@
 
         audioElement = new Audio();
         audioElement.srcObject = remoteStream;
-        audioElement.volume = 1.0; // Default volume
+        audioElement.volume = 1.0;
         
-        // Add buffer for smoother playback
-        audioElement.bufferSize = 1024;
+        // Increase buffer size for smoother playback
+        audioElement.bufferSize = 2048;
 
-        // Add volume control for listeners
-        const volumeControl = document.createElement('div');
-        volumeControl.innerHTML = `
-            <div style="margin-top: 1rem;">
-                <label for="listenerVolume">Volume: </label>
-                <input type="range" id="listenerVolume" min="0" max="2" step="0.1" value="1" style="width: 200px;">
-            </div>
-        `;
-        listenerControls.appendChild(volumeControl);
-
-        document.getElementById('listenerVolume').addEventListener('input', (e) => {
-            audioElement.volume = e.target.value;
-        });
+        audioElement.oncanplay = () => {
+            startListeningBtn.style.display = 'block';
+        };
 
         listenerControls.style.display = 'block';
-        startListeningBtn.style.display = 'block';
         startListeningBtn.onclick = () => {
             audioElement.play()
                 .then(() => {
                     showNotification('Playback started');
-                    listenerControls.style.display = 'block';
                 })
                 .catch(err => {
                     console.error('Playback error:', err);
@@ -605,10 +591,7 @@
                         autoGainControl: false,
                         deviceId: 'default'
                     },
-                    video: {
-                        width: { ideal: 1 },
-                        height: { ideal: 1 }
-                    }
+                    video: false
                 });
             }
 
@@ -621,14 +604,12 @@
 
             const compressedStream = compressAudio(stream);
             connections.forEach(conn => {
-                const call = peer.call(conn.peer, compressedStream);
-                call.on('error', handleCallError);
+                // Stream through both peers simultaneously
+                const mainCall = peer.call(conn.peer, compressedStream);
+                mainCall.on('error', handleCallError);
                 
-                // Stream through backup peer as well
-                if (backupPeer) {
-                    const backupCall = backupPeer.call(conn.peer, compressedStream);
-                    backupCall.on('error', handleCallError);
-                }
+                const backupCall = backupPeer.call(conn.peer, compressedStream);
+                backupCall.on('error', handleCallError);
             });
 
             stream.getAudioTracks()[0].onended = handleStreamEnd;
@@ -660,24 +641,30 @@
     }
 
     function connectToHost(hostId) {
-        const conn = peer.connect(hostId);
-        conn.on('open', () => {
-            startStreamBtn.style.display = 'none';
-            shareLinkBtn.style.display = 'none';
-            statusContainer.style.display = 'none';
-            showNotification('Connected to host');
-            startListeningBtn.style.display = 'block';
-        });
-    
-        conn.on('error', (err) => {
-            console.error('Host connection error:', err);
-            showNotification('Failed to connect to host');
-            showReconnectButton();
-        });
+        // Connect to both main and backup peers
+        const mainConn = peer.connect(hostId);
+        const backupConn = backupPeer.connect(hostId);
+        
+        [mainConn, backupConn].forEach(conn => {
+            conn.on('open', () => {
+                startStreamBtn.style.display = 'none';
+                shareLinkBtn.style.display = 'none';
+                statusContainer.style.display = 'none';
+                showNotification('Connected to host');
+                startListeningBtn.style.display = 'block';
+            });
+        
+            conn.on('error', (err) => {
+                console.error('Host connection error:', err);
+                if (activeConnection === 'main') {
+                    useBackupPeer();
+                }
+            });
 
-        conn.on('close', () => {
-            showNotification('Disconnected from host');
-            showReconnectButton();
+            conn.on('close', () => {
+                showNotification('Disconnected from host');
+                showReconnectButton();
+            });
         });
     }
 
@@ -686,17 +673,18 @@
         const hostId = urlParams.get('host');
         if (hostId) {
             connectToHost(hostId);
-            startListeningBtn.style.display = 'block';
         }
     }
 
     function useBackupPeer() {
         if (backupPeer && stream) {
+            activeConnection = 'backup';
             const compressedStream = compressAudio(stream);
             connections.forEach(conn => {
                 const call = backupPeer.call(conn.peer, compressedStream);
                 call.on('error', handleCallError);
             });
+            showNotification('Switched to backup connection');
         }
     }
 
@@ -704,7 +692,8 @@
     startStreamBtn.addEventListener('click', startStreaming);
     
     shareLinkBtn.addEventListener('click', () => {
-        const url = `${window.location.origin}${window.location.pathname}?host=${peer.id}`;
+        // Share both peer IDs for redundancy
+        const url = `${window.location.origin}${window.location.pathname}?host=${peer.id}&backup=${backupPeer.id}`;
         navigator.clipboard.writeText(url).then(() => {
             showNotification('Share link copied to clipboard');
         }).catch(err => {
@@ -728,8 +717,6 @@
         initPeer(); // Initialize main peer
         initPeer(true); // Initialize backup peer
     });
-    </script>
+</script>
 </body>
 </html>
-
-
