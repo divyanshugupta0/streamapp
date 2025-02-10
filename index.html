@@ -300,6 +300,7 @@
     let audioElement = null;
     let sessionId = null;
     let backupSessionId = null; // Store backup peer ID
+    let gainNode = null; // For volume control
     
     // DOM Elements
     const startStreamBtn = document.getElementById('startStream');
@@ -325,11 +326,12 @@
         return sessionCookie ? sessionCookie.split('=')[1] : null;
     }
 
-    // Audio Processing with Enhanced Buffering
+    // Audio Processing with Enhanced Buffering and Volume Control
     function compressAudio(audioStream) {
         const ctx = new AudioContext();
         const source = ctx.createMediaStreamSource(audioStream);
         const compressor = ctx.createDynamicsCompressor();
+        gainNode = ctx.createGain(); // Create gain node for volume control
         const destination = ctx.createMediaStreamDestination();
         
         // Add buffer for smoother streaming
@@ -342,7 +344,8 @@
         compressor.release.value = 0.25;
 
         source.connect(compressor);
-        compressor.connect(buffer);
+        compressor.connect(gainNode);
+        gainNode.connect(buffer);
         buffer.connect(destination);
         
         return destination.stream;
@@ -363,6 +366,33 @@
         statusIndicator.classList.toggle('active', isStreaming);
         statusContainer.classList.toggle('streaming', isStreaming);
         statusText.textContent = isStreaming ? 'Streaming' : 'Not Streaming';
+
+        // Add volume control when streaming
+        if (isStreaming) {
+            const volumeControl = document.createElement('div');
+            volumeControl.innerHTML = `
+                <div style="margin-top: 1rem;">
+                    <label for="volume">Volume: </label>
+                    <input type="range" id="volume" min="0" max="2" step="0.1" value="1" style="width: 200px;">
+                </div>
+            `;
+            statusContainer.appendChild(volumeControl);
+
+            document.getElementById('volume').addEventListener('input', (e) => {
+                if (gainNode) {
+                    gainNode.gain.value = e.target.value;
+                }
+                if (audioElement) {
+                    audioElement.volume = e.target.value;
+                }
+            });
+        } else {
+            // Remove volume control when not streaming
+            const volumeControl = statusContainer.querySelector('div div');
+            if (volumeControl) {
+                volumeControl.remove();
+            }
+        }
     }
 
     function handlePeerError(error) {
@@ -515,9 +545,24 @@
 
         audioElement = new Audio();
         audioElement.srcObject = remoteStream;
+        audioElement.volume = 1.0; // Default volume
         
         // Add buffer for smoother playback
         audioElement.bufferSize = 1024;
+
+        // Add volume control for listeners
+        const volumeControl = document.createElement('div');
+        volumeControl.innerHTML = `
+            <div style="margin-top: 1rem;">
+                <label for="listenerVolume">Volume: </label>
+                <input type="range" id="listenerVolume" min="0" max="2" step="0.1" value="1" style="width: 200px;">
+            </div>
+        `;
+        listenerControls.appendChild(volumeControl);
+
+        document.getElementById('listenerVolume').addEventListener('input', (e) => {
+            audioElement.volume = e.target.value;
+        });
 
         listenerControls.style.display = 'block';
         startListeningBtn.style.display = 'block';
@@ -525,7 +570,7 @@
             audioElement.play()
                 .then(() => {
                     showNotification('Playback started');
-                    listenerControls.style.display = 'none';
+                    listenerControls.style.display = 'block';
                 })
                 .catch(err => {
                     console.error('Playback error:', err);
@@ -603,6 +648,10 @@
         }
         isStreaming = false;
         updateStreamingUI(false);
+        if (gainNode) {
+            gainNode.disconnect();
+            gainNode = null;
+        }
     }
 
     function handleStreamEnd() {
