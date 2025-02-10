@@ -297,7 +297,6 @@
     let connections = new Set();
     let isStreaming = false;
     let audioElement = null;
-    let sessionId = null;
     
     // DOM Elements
     const startStreamBtn = document.getElementById('startStream');
@@ -309,36 +308,6 @@
     const notification = document.getElementById('notification');
     const listenerControls = document.getElementById('listenerControls');
     const startListeningBtn = document.getElementById('startListening');
-
-    // Session Management
-    function setSessionCookie(sessionId) {
-        document.cookie = `sessionId=${sessionId};path=/;max-age=86400`; // 24 hours
-    }
-
-    function getSessionCookie() {
-        const cookies = document.cookie.split(';');
-        const sessionCookie = cookies.find(c => c.trim().startsWith('sessionId='));
-        return sessionCookie ? sessionCookie.split('=')[1] : null;
-    }
-
-    // Audio Processing
-    function compressAudio(audioStream) {
-        const ctx = new AudioContext();
-        const source = ctx.createMediaStreamSource(audioStream);
-        const compressor = ctx.createDynamicsCompressor();
-        const destination = ctx.createMediaStreamDestination();
-
-        compressor.threshold.value = -50;
-        compressor.knee.value = 40;
-        compressor.ratio.value = 12;
-        compressor.attack.value = 0;
-        compressor.release.value = 0.25;
-
-        source.connect(compressor);
-        compressor.connect(destination);
-        
-        return destination.stream;
-    }
 
     // Utility Functions
     function showNotification(message) {
@@ -404,15 +373,6 @@
         showNotification('User disconnected');
     }
 
-    function showReconnectButton() {
-        listenerControls.innerHTML = `
-            <button class="btn" onclick="reconnectToHost()">
-                Reconnect to Host
-            </button>
-        `;
-        listenerControls.style.display = 'block';
-    }
-
     // Core Functionality
     function initPeer() {
         peer = new Peer({
@@ -426,9 +386,6 @@
         });
         
         peer.on('open', id => {
-            sessionId = id;
-            setSessionCookie(id);
-            
             const urlParams = new URLSearchParams(window.location.search);
             const hostId = urlParams.get('host');
             
@@ -456,8 +413,7 @@
         showNotification('New user connected');
         
         if (stream) {
-            const compressedStream = compressAudio(stream);
-            const call = peer.call(conn.peer, compressedStream);
+            const call = peer.call(conn.peer, stream);
             call.on('error', handleCallError);
         }
         
@@ -505,9 +461,11 @@
                 return;
             }
 
+            // Check if running on mobile
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
             if (isMobile) {
+                // Mobile audio constraints
                 stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: false,
@@ -517,6 +475,7 @@
                     video: false
                 });
             } else {
+                // Desktop system audio constraints
                 stream = await navigator.mediaDevices.getDisplayMedia({
                     audio: {
                         echoCancellation: false,
@@ -538,9 +497,8 @@
                 );
             }
 
-            const compressedStream = compressAudio(stream);
             connections.forEach(conn => {
-                const call = peer.call(conn.peer, compressedStream);
+                const call = peer.call(conn.peer, stream);
                 call.on('error', handleCallError);
             });
 
@@ -580,21 +538,7 @@
         conn.on('error', (err) => {
             console.error('Host connection error:', err);
             showNotification('Failed to connect to host');
-            showReconnectButton();
         });
-
-        conn.on('close', () => {
-            showNotification('Disconnected from host');
-            showReconnectButton();
-        });
-    }
-
-    function reconnectToHost() {
-        const urlParams = new URLSearchParams(window.location.search);
-        const hostId = urlParams.get('host');
-        if (hostId) {
-            connectToHost(hostId);
-        }
     }
 
     // Event Listeners
@@ -612,10 +556,6 @@
     
     // Initialize on page load
     window.addEventListener('load', () => {
-        const savedSessionId = getSessionCookie();
-        if (savedSessionId) {
-            sessionId = savedSessionId;
-        }
         initPeer();
     });
     
