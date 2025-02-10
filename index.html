@@ -292,11 +292,13 @@
     <div class="notification" id="notification"></div>
 
     <script>
-        let peer;
+    let peer;
     let stream;
     let connections = new Set();
     let isStreaming = false;
     let audioElement = null;
+    let hostId = null;
+    let sessionId = null;
     
     // DOM Elements
     const startStreamBtn = document.getElementById('startStream');
@@ -308,6 +310,39 @@
     const notification = document.getElementById('notification');
     const listenerControls = document.getElementById('listenerControls');
     const startListeningBtn = document.getElementById('startListening');
+
+    // Session Management
+    function setSessionCookie(sessionId) {
+        document.cookie = `sessionId=${sessionId};path=/;max-age=86400`; // 24 hours
+    }
+
+    function getSessionCookie() {
+        const match = document.cookie.match(new RegExp('(^| )sessionId=([^;]+)'));
+        return match ? match[2] : null;
+    }
+
+    function generateSessionId() {
+        return Math.random().toString(36).substring(2, 15);
+    }
+
+    // Audio Processing
+    function compressAudio(audioStream) {
+        const ctx = new AudioContext();
+        const source = ctx.createMediaStreamSource(audioStream);
+        const compressor = ctx.createDynamicsCompressor();
+        const destination = ctx.createMediaStreamDestination();
+
+        compressor.threshold.value = -50;
+        compressor.knee.value = 40;
+        compressor.ratio.value = 12;
+        compressor.attack.value = 0;
+        compressor.release.value = 0.25;
+
+        source.connect(compressor);
+        compressor.connect(destination);
+
+        return destination.stream;
+    }
 
     // Utility Functions
     function showNotification(message) {
@@ -326,6 +361,17 @@
         statusText.textContent = isStreaming ? 'Streaming' : 'Not Streaming';
     }
 
+    function showReconnectButton() {
+        listenerControls.innerHTML = `
+            <button class="btn" id="reconnectBtn">
+                Reconnect to Host
+            </button>
+        `;
+        const reconnectBtn = document.getElementById('reconnectBtn');
+        reconnectBtn.onclick = () => connectToHost(hostId);
+        listenerControls.style.display = 'block';
+    }
+
     function handlePeerError(error) {
         console.error('Peer error:', error);
         showNotification('Connection error: ' + error.type);
@@ -337,6 +383,7 @@
     function handleCallError(err) {
         console.error('Call error:', err);
         showNotification('Call failed: ' + err.message);
+        showReconnectButton();
     }
 
     function handleStreamError(err) {
@@ -375,7 +422,10 @@
 
     // Core Functionality
     function initPeer() {
-        peer = new Peer({
+        sessionId = getSessionCookie() || generateSessionId();
+        setSessionCookie(sessionId);
+
+        peer = new Peer(sessionId, {
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -387,7 +437,7 @@
         
         peer.on('open', id => {
             const urlParams = new URLSearchParams(window.location.search);
-            const hostId = urlParams.get('host');
+            hostId = urlParams.get('host');
             
             if (hostId && hostId !== id) {
                 connectToHost(hostId);
@@ -413,7 +463,7 @@
         showNotification('New user connected');
         
         if (stream) {
-            const call = peer.call(conn.peer, stream);
+            const call = peer.call(conn.peer, compressAudio(stream));
             call.on('error', handleCallError);
         }
         
@@ -421,6 +471,9 @@
             connections.delete(conn);
             updateUserList();
             showNotification('User disconnected');
+            if (conn.peer === hostId) {
+                showReconnectButton();
+            }
         });
     }
 
@@ -437,10 +490,31 @@
             audioElement.remove();
         }
 
-        audioElement = new Audio();
-        audioElement.srcObject = remoteStream;
+        const ctx = new AudioContext();
+        const source = ctx.createMediaStreamSource(remoteStream);
+        const compressor = ctx.createDynamicsCompressor();
+        const destination = ctx.createMediaStreamDestination();
 
+        compressor.threshold.value = -50;
+        compressor.knee.value = 40;
+        compressor.ratio.value = 12;
+        compressor.attack.value = 0;
+        compressor.release.value = 0.25;
+
+        source.connect(compressor);
+        compressor.connect(destination);
+
+        audioElement = new Audio();
+        audioElement.srcObject = destination.stream;
+
+        listenerControls.innerHTML = `
+            <button class="btn" id="startListening">
+                Start Listening
+            </button>
+        `;
+        const startListeningBtn = document.getElementById('startListening');
         listenerControls.style.display = 'block';
+        
         startListeningBtn.onclick = () => {
             audioElement.play()
                 .then(() => {
@@ -461,11 +535,9 @@
                 return;
             }
 
-            // Check if running on mobile
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
             if (isMobile) {
-                // Mobile audio constraints
                 stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: false,
@@ -475,7 +547,6 @@
                     video: false
                 });
             } else {
-                // Desktop system audio constraints
                 stream = await navigator.mediaDevices.getDisplayMedia({
                     audio: {
                         echoCancellation: false,
@@ -497,8 +568,9 @@
                 );
             }
 
+            const compressedStream = compressAudio(stream);
             connections.forEach(conn => {
-                const call = peer.call(conn.peer, stream);
+                const call = peer.call(conn.peer, compressedStream);
                 call.on('error', handleCallError);
             });
 
@@ -538,6 +610,7 @@
         conn.on('error', (err) => {
             console.error('Host connection error:', err);
             showNotification('Failed to connect to host');
+            showReconnectButton();
         });
     }
 
@@ -558,7 +631,35 @@
     window.addEventListener('load', () => {
         initPeer();
     });
+    // Handle page unload/close
+    window.addEventListener('beforeunload', () => {
+        stopStreaming();
+        if (peer) {
+            peer.destroy();
+        }
+    });
+
+    // Check URL parameters for host ID
+    const urlParams = new URLSearchParams(window.location.search);
+    const hostIdFromUrl = urlParams.get('host');
     
+    if (hostIdFromUrl) {
+        hostId = hostIdFromUrl;
+        startStreamBtn.style.display = 'none';
+        shareLinkBtn.style.display = 'none';
+        listenerControls.style.display = 'block';
+        
+        startListeningBtn.addEventListener('click', () => {
+            connectToHost(hostId);
+        });
+    }
+
+    // Handle errors
+    window.onerror = function(msg, url, lineNo, columnNo, error) {
+        console.error('Window Error:', error);
+        showNotification('An error occurred');
+        return false;
+    };
 </script>
 </body>
 </html>
