@@ -293,11 +293,13 @@
 
     <script>
     let peer;
+    let backupPeer; // Additional peer for redundancy
     let stream;
     let connections = new Set();
     let isStreaming = false;
     let audioElement = null;
     let sessionId = null;
+    let backupSessionId = null; // Store backup peer ID
     
     // DOM Elements
     const startStreamBtn = document.getElementById('startStream');
@@ -311,23 +313,28 @@
     const startListeningBtn = document.getElementById('startListening');
 
     // Session Management
-    function setSessionCookie(sessionId) {
-        document.cookie = `sessionId=${sessionId};path=/;max-age=86400`; // 24 hours
+    function setSessionCookie(sessionId, isBackup = false) {
+        const cookieName = isBackup ? 'backupSessionId' : 'sessionId';
+        document.cookie = `${cookieName}=${sessionId};path=/;max-age=86400`; // 24 hours
     }
 
-    function getSessionCookie() {
+    function getSessionCookie(isBackup = false) {
+        const cookieName = isBackup ? 'backupSessionId' : 'sessionId';
         const cookies = document.cookie.split(';');
-        const sessionCookie = cookies.find(c => c.trim().startsWith('sessionId='));
+        const sessionCookie = cookies.find(c => c.trim().startsWith(`${cookieName}=`));
         return sessionCookie ? sessionCookie.split('=')[1] : null;
     }
 
-    // Audio Processing
+    // Audio Processing with Enhanced Buffering
     function compressAudio(audioStream) {
         const ctx = new AudioContext();
         const source = ctx.createMediaStreamSource(audioStream);
         const compressor = ctx.createDynamicsCompressor();
         const destination = ctx.createMediaStreamDestination();
-
+        
+        // Add buffer for smoother streaming
+        const buffer = ctx.createScriptProcessor(4096, 1, 1);
+        
         compressor.threshold.value = -50;
         compressor.knee.value = 40;
         compressor.ratio.value = 12;
@@ -335,7 +342,8 @@
         compressor.release.value = 0.25;
 
         source.connect(compressor);
-        compressor.connect(destination);
+        compressor.connect(buffer);
+        buffer.connect(destination);
         
         return destination.stream;
     }
@@ -368,6 +376,10 @@
     function handleCallError(err) {
         console.error('Call error:', err);
         showNotification('Call failed: ' + err.message);
+        // Try backup peer if main fails
+        if (backupPeer) {
+            useBackupPeer();
+        }
     }
 
     function handleStreamError(err) {
@@ -414,8 +426,8 @@
     }
 
     // Core Functionality
-    function initPeer() {
-        peer = new Peer({
+    function initPeer(isBackup = false) {
+        const newPeer = new Peer({
             config: {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
@@ -425,21 +437,30 @@
             debug: 2
         });
         
-        peer.on('open', id => {
-            sessionId = id;
-            setSessionCookie(id);
-            
-            const urlParams = new URLSearchParams(window.location.search);
-            const hostId = urlParams.get('host');
-            
-            if (hostId && hostId !== id) {
-                connectToHost(hostId);
+        newPeer.on('open', id => {
+            if (isBackup) {
+                backupSessionId = id;
+                setSessionCookie(id, true);
+                backupPeer = newPeer;
+            } else {
+                sessionId = id;
+                setSessionCookie(id);
+                peer = newPeer;
+                
+                const urlParams = new URLSearchParams(window.location.search);
+                const hostId = urlParams.get('host');
+                
+                if (hostId && hostId !== id) {
+                    connectToHost(hostId);
+                }
             }
         });
     
-        peer.on('error', handlePeerError);
-        peer.on('connection', handleNewConnection);
-        peer.on('call', handleIncomingCall);
+        newPeer.on('error', handlePeerError);
+        newPeer.on('connection', handleNewConnection);
+        newPeer.on('call', handleIncomingCall);
+        
+        return newPeer;
     }
 
     function reconnectPeer() {
@@ -447,6 +468,11 @@
             peer.reconnect();
         } else {
             initPeer();
+        }
+        if (backupPeer && !backupPeer.destroyed) {
+            backupPeer.reconnect();
+        } else {
+            initPeer(true);
         }
     }
 
@@ -459,6 +485,12 @@
             const compressedStream = compressAudio(stream);
             const call = peer.call(conn.peer, compressedStream);
             call.on('error', handleCallError);
+            
+            // Also stream through backup peer
+            if (backupPeer) {
+                const backupCall = backupPeer.call(conn.peer, compressedStream);
+                backupCall.on('error', handleCallError);
+            }
         }
         
         conn.on('close', () => {
@@ -483,8 +515,12 @@
 
         audioElement = new Audio();
         audioElement.srcObject = remoteStream;
+        
+        // Add buffer for smoother playback
+        audioElement.bufferSize = 1024;
 
         listenerControls.style.display = 'block';
+        startListeningBtn.style.display = 'block';
         startListeningBtn.onclick = () => {
             audioElement.play()
                 .then(() => {
@@ -542,6 +578,12 @@
             connections.forEach(conn => {
                 const call = peer.call(conn.peer, compressedStream);
                 call.on('error', handleCallError);
+                
+                // Stream through backup peer as well
+                if (backupPeer) {
+                    const backupCall = backupPeer.call(conn.peer, compressedStream);
+                    backupCall.on('error', handleCallError);
+                }
             });
 
             stream.getAudioTracks()[0].onended = handleStreamEnd;
@@ -575,6 +617,7 @@
             shareLinkBtn.style.display = 'none';
             statusContainer.style.display = 'none';
             showNotification('Connected to host');
+            startListeningBtn.style.display = 'block';
         });
     
         conn.on('error', (err) => {
@@ -594,6 +637,17 @@
         const hostId = urlParams.get('host');
         if (hostId) {
             connectToHost(hostId);
+            startListeningBtn.style.display = 'block';
+        }
+    }
+
+    function useBackupPeer() {
+        if (backupPeer && stream) {
+            const compressedStream = compressAudio(stream);
+            connections.forEach(conn => {
+                const call = backupPeer.call(conn.peer, compressedStream);
+                call.on('error', handleCallError);
+            });
         }
     }
 
@@ -613,13 +667,20 @@
     // Initialize on page load
     window.addEventListener('load', () => {
         const savedSessionId = getSessionCookie();
+        const savedBackupSessionId = getSessionCookie(true);
+        
         if (savedSessionId) {
             sessionId = savedSessionId;
         }
-        initPeer();
+        if (savedBackupSessionId) {
+            backupSessionId = savedBackupSessionId;
+        }
+        
+        initPeer(); // Initialize main peer
+        initPeer(true); // Initialize backup peer
     });
-    
-</script>
+    </script>
 </body>
 </html>
+
 
